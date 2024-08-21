@@ -64,8 +64,8 @@ def parse_args_and_config():
         "--resume_model", type=str, default=None, help="model checkpoint"
     )
 
-    parser.add_argument("--frame0", type=str, default=None, help="previous frame")
-    parser.add_argument("--frame1", type=str, default=None, help="next frame")
+    parser.add_argument("--frame_start", type=int, default=None, help="previous frame")
+    parser.add_argument("--frame_end", type=int, default=None, help="next frame")
     parser.add_argument("--folder", type=str, default=None, help="folder of frames")
 
     parser.add_argument(
@@ -122,8 +122,6 @@ def interpolate_2_frames(frame0_path, frame1_path, model):
     b = np.array(Image.open(frame1_path)).astype(np.float32) / (2**16-1) *2 - 1
     frame1 = cv2.merge((b, b, b))
     frame1 = torch.from_numpy(np.moveaxis(np.array(frame1), -1, 0)).cuda().unsqueeze(0)
-    # frame0 = transform(a).cuda().unsqueeze(0)
-    # frame1 = transform(b).cuda().unsqueeze(0)
     I4 = interpolate(frame0, frame1, model)
     I2 = interpolate(frame0, I4, model)
     I1 = interpolate(frame0, I2, model)
@@ -144,7 +142,7 @@ def number_from_file_name(file_name):
     return int(file_name.split(".")[0].split("_")[-1])
 
 
-def interpolate_whole_video(folder_path: Path, model, frame_range=(480, 500)):
+def interpolate_whole_video(folder_path: Path, model, frame_range):
     video_path = Path(f"./interpolated/{folder_path.name}.mp4")
     output_path = Path(f"./interpolated/{folder_path.name}")
 
@@ -154,10 +152,12 @@ def interpolate_whole_video(folder_path: Path, model, frame_range=(480, 500)):
     file_list.sort(
         key=number_from_file_name
     )  # Sort files by the number in the file name
-    file_list = list(filter(lambda x: (
-        (number_from_file_name(x) >= frame_range[0]) and
-        (number_from_file_name(x) <= frame_range[1]) 
-    ), file_list))
+
+    if frame_range[0] is None or frame_range[1] is None:
+        file_list = list(filter(lambda x: (
+            (number_from_file_name(x) >= frame_range[0]) and
+            (number_from_file_name(x) <= frame_range[1]) 
+        ), file_list))
 
     count = 0
     for file_name1, file_name2 in zip(file_list[:-1], file_list[1:]):
@@ -166,7 +166,7 @@ def interpolate_whole_video(folder_path: Path, model, frame_range=(480, 500)):
         new_frames = interpolate_2_frames(file_path1, file_path2, model)
         for i, frame in enumerate(new_frames):
             Image.fromarray(frame).save(
-                    f"{output_path}/{file_path1.stem}_{i}.png" #{file_path1.suffix}"
+                f"{output_path}/{file_path1.stem}_{i}{file_path1.suffix}"
             )
         print(f"{count}/{len(file_list)}")
 
@@ -209,7 +209,7 @@ def create_video(folder_path, output_path, video_path, fps=16):
     image_0 = None
     for file in sorted_files:
         image = cv2.imread(str(file))
-        _, n = sort_key(file)
+        n, _ = sort_key(str(file))
         if n == 0:
             image_0 = image
         video.write(image)
@@ -252,61 +252,16 @@ def main():
     args = nconfig.args
     model = LatentBrownianBridgeModel(nconfig.model)
     state_dict_pth = args.resume_model
-    frame0_path = args.frame0
-    frame1_path = args.frame1
+    frame_start = args.frame_start
+    frame_end = args.frame_end
     folder_path = args.folder
     model_states = torch.load(state_dict_pth, map_location="cpu")
     model.load_state_dict(model_states["model"])
     model.eval()
     model = model.cuda()
     if folder_path:
-        interpolate_whole_video(Path(folder_path), model)
-    # transform = transforms.Compose(
-    #     [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-    # )  # outptu tensor in [-1,1]
-    # a = (np.array(Image.open(frame0_path)) / 256).astype(np.uint8)
-    # a = cv2.merge((a, a, a))
-    # b = (np.array(Image.open(frame1_path)) / 256).astype(np.uint8)
-    # b = cv2.merge((b, b, b))
-    # frame0 = transform(a).cuda().unsqueeze(0)
-    # frame1 = transform(b).cuda().unsqueeze(0)
-    # I4 = interpolate(frame0, frame1, model)
-    # I2 = interpolate(frame0, I4, model)
-    # I1 = interpolate(frame0, I2, model)
-    # I3 = interpolate(I2, I4, model)
-
-    # I6 = interpolate(I4, frame1, model)
-    # I7 = interpolate(I6, frame1, model)
-    # I5 = interpolate(I4, I6, model)
-
-    # imlist = [
-    #     frame0.cpu().numpy(),
-    #     I1.cpu().numpy(),
-    #     I2.cpu().numpy(),
-    #     I3.cpu().numpy(),
-    #     I4.cpu().numpy(),
-    #     I5.cpu().numpy(),
-    #     I6.cpu().numpy(),
-    #     I7.cpu().numpy(),
-    #     frame1.cpu().numpy(),
-    # ]
-    # imlist = unnorm(imlist)
-    # count = 0
-    # d = "interpolated"
-    # try:
-    #     os.makedirs(f"./{d}")
-    # except:
-    #     pass
-    # for im in imlist:
-    #     img = Image.fromarray((im.squeeze().transpose(1, 2, 0) * 255).astype(np.uint8))
-    #     img.save(f"./{d}/{count}.png")
-    #     count += 1
-    # # Provide the path to the input image folder, output video file, and desired FPS
-    # input_folder = f"./{d}"
-    # output_file = f"./{d}/video.mp4"
-    # fps = 2  # Frames per second
-    # convert_images_to_video(input_folder, output_file, fps)
-
+        interpolate_whole_video(Path(folder_path), model, (frame_start, frame_end))
+    
 
 if __name__ == "__main__":
     main()
