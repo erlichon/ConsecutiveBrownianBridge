@@ -162,16 +162,6 @@ def main():
     else:
         frame0 = transform(frame0).cuda().unsqueeze(0)
         frame1 = transform(frame1).cuda().unsqueeze(0)
-    # I4 = interpolate(frame0,frame1,model)
-    # I2 = interpolate(frame0,I4,model)
-    # I1 = interpolate(frame0,I2,model)
-    # I3 = interpolate(I2,I4,model)
-
-    # I6 = interpolate(I4,frame1,model)
-    # I7 = interpolate(I6,frame1,model) 
-    # I5 = interpolate(I4,I6,model)
-
-    # imlist = [frame0.cpu().numpy(),I1.cpu().numpy(),I2.cpu().numpy(),I3.cpu().numpy(),I4.cpu().numpy(),I5.cpu().numpy(),I6.cpu().numpy(),I7.cpu().numpy(),frame1.cpu().numpy()]
     imlist = interpolte_N_frames(frame0, frame1, model, args.xN)
     imlist = unnorm(imlist)
     count = 0
