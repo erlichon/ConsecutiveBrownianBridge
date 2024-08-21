@@ -15,10 +15,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from abc import ABC, abstractmethod
 from tqdm.autonotebook import tqdm
 
-from evaluation.FID import calc_FID
-from evaluation.LPIPS import calc_LPIPS
+# from evaluation.FID import calc_FID
+# from evaluation.LPIPS import calc_LPIPS
 from runners.base.EMA import EMA
 from runners.utils import make_save_dirs, make_dir, get_dataset, remove_file
+import torch.multiprocessing as mp
+import torch.distributed as dist
 
 
 class BaseRunner(ABC):
@@ -49,7 +51,8 @@ class BaseRunner(ABC):
                                                                 suffix=self.config.model.model_name)
 
         self.save_config()  # save configuration file
-        self.writer = SummaryWriter(self.config.result.log_path)  # initialize SummaryWriter
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0):
+            self.writer = SummaryWriter(self.config.result.log_path)  # initialize SummaryWriter
 
         # initialize model
         self.net, self.optimizer, self.scheduler = self.initialize_model_optimizer_scheduler(self.config)
@@ -57,7 +60,8 @@ class BaseRunner(ABC):
             self.net.vqgan.init_from_ckpt(self.config.model.VQGAN.params.ckpt_path)
             for param in self.net.vqgan.parameters():
                 param.requires_grad = False
-        self.print_model_summary(self.net)
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0):
+            self.print_model_summary(self.net)
 
         # initialize EMA
         self.use_ema = False if not self.config.model.__contains__('EMA') else self.config.model.EMA.use_ema
@@ -195,22 +199,27 @@ class BaseRunner(ABC):
                             epoch=epoch,
                             step=step,
                             opt_idx=0,
-                            stage='val_step')
+                            stage='val_step',
+                            write=not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0))
         if len(self.optimizer) > 1:
             loss = self.loss_fn(net=self.net,
                                 batch=val_batch,
                                 epoch=epoch,
                                 step=step,
                                 opt_idx=1,
-                                stage='val_step')
+                                stage='val_step',
+                                write=not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0))
         self.restore_ema()
 
     @torch.no_grad()
     def validation_epoch(self, val_loader, epoch):
         self.apply_ema()
         self.net.eval()
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):
+            pbar = tqdm(val_loader, total=len(val_loader), smoothing=0.01)
+        else:
+            pbar = val_loader
 
-        pbar = tqdm(val_loader, total=len(val_loader), smoothing=0.01)
         step = 0
         loss_sum = 0.
         dloss_sum = 0.
@@ -234,10 +243,12 @@ class BaseRunner(ABC):
                 dloss_sum += loss
             step += 1
         average_loss = loss_sum / step
-        self.writer.add_scalar(f'val_epoch/loss', average_loss, epoch)
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0):
+            self.writer.add_scalar(f'val_epoch/loss', average_loss, epoch)
         if len(self.optimizer) > 1:
             average_dloss = dloss_sum / step
-            self.writer.add_scalar(f'val_dloss_epoch/loss', average_dloss, epoch)
+            if not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0):
+                self.writer.add_scalar(f'val_dloss_epoch/loss', average_dloss, epoch)
         self.restore_ema()
         return average_loss
 
@@ -245,6 +256,7 @@ class BaseRunner(ABC):
     def sample_step(self, train_batch, val_batch):
         self.apply_ema()
         self.net.eval()
+
         sample_path = make_dir(os.path.join(self.config.result.image_path, str(self.global_step)))
         if self.config.training.use_DDP:
             self.sample(self.net.module, train_batch, sample_path, stage='train')
@@ -329,53 +341,61 @@ class BaseRunner(ABC):
         pass
 
     def train(self):
-        print(self.__class__.__name__)
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and  self.config.training.local_rank == 0):
+            print(self.__class__.__name__)
 
         train_dataset, val_dataset, test_dataset = get_dataset(self.config.data)
         train_sampler = None
         val_sampler = None
         test_sampler = None
         if self.config.training.use_DDP:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
-            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=self.config.training.world_size, rank=self.config.training.local_rank)
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=self.config.training.world_size, rank=self.config.training.local_rank)
+            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=self.config.training.world_size, rank=self.config.training.local_rank)
             train_loader = DataLoader(train_dataset,
                                       batch_size=self.config.data.train.batch_size,
-                                      num_workers=8,
+                                      num_workers=self.config.data.train.num_workers,
                                       drop_last=True,
-                                      sampler=train_sampler)
+                                      sampler=train_sampler, 
+                                      pin_memory=True,
+                                      persistent_workers=True)
             val_loader = DataLoader(val_dataset,
                                     batch_size=self.config.data.val.batch_size,
-                                    num_workers=8,
+                                    num_workers=self.config.data.val.num_workers,
                                     drop_last=True,
-                                    sampler=val_sampler)
+                                    sampler=val_sampler, 
+                                    pin_memory=True,
+                                    persistent_workers=True)
             test_loader = DataLoader(test_dataset,
                                      batch_size=self.config.data.test.batch_size,
-                                     num_workers=8,
+                                     num_workers=self.config.data.test.num_workers,
                                      drop_last=True,
-                                     sampler=test_sampler)
+                                     sampler=test_sampler, 
+                                     pin_memory=True,
+                                     persistent_workers=True)
         else:
 
             train_loader = DataLoader(train_dataset,
                                       batch_size=self.config.data.train.batch_size,
                                       shuffle=self.config.data.train.shuffle,
-                                      num_workers=8,
+                                      num_workers=self.config.data.train.num_workers,
                                       drop_last=True)
             val_loader = DataLoader(val_dataset,
                                     batch_size=self.config.data.val.batch_size,
                                     shuffle=self.config.data.val.shuffle,
-                                    num_workers=8,
+                                    num_workers=self.config.data.val.num_workers,
                                     drop_last=True)
             test_loader = DataLoader(test_dataset,
                                      batch_size=self.config.data.test.batch_size,
                                      shuffle=False,
-                                     num_workers=8,
+                                     num_workers=self.config.data.test.num_workers,
                                      drop_last=True)
 
         epoch_length = len(train_loader)
         start_epoch = self.global_epoch
-        print(
-            f"start training {self.config.model.model_name} on {self.config.data.dataset_name}, {len(train_loader)} iters per epoch")
+        if self.config.training.use_DDP and self.config.training.local_rank == 0:
+            print(
+                f"start training {self.config.model.model_name} on {self.config.data.dataset_name}, {len(train_loader)} iters per epoch")
 
         try:
             accumulate_grad_batches = self.config.training.accumulate_grad_batches
@@ -387,8 +407,10 @@ class BaseRunner(ABC):
                 if self.config.training.use_DDP:
                     train_sampler.set_epoch(epoch)
                     val_sampler.set_epoch(epoch)
-
-                pbar = tqdm(train_loader, total=len(train_loader), smoothing=0.01)
+                if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):                
+                    pbar = tqdm(train_loader, total=len(train_loader), smoothing=0.01)
+                else:
+                    pbar = train_loader
                 self.global_epoch = epoch
                 start_time = time.time()
                 for train_batch in pbar:
@@ -406,7 +428,8 @@ class BaseRunner(ABC):
                                             epoch=epoch,
                                             step=self.global_step,
                                             opt_idx=i,
-                                            stage='train')
+                                            stage='train', 
+                                            write = not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0))
 
                         loss.backward()
                         if self.global_step % accumulate_grad_batches == 0:
@@ -420,19 +443,21 @@ class BaseRunner(ABC):
                         self.step_ema()
 
                     if len(self.optimizer) > 1:
-                        pbar.set_description(
-                            (
-                                f'Epoch: [{epoch + 1} / {self.config.training.n_epochs}] '
-                                f'iter: {self.global_step} loss-1: {losses[0]:.4f} loss-2: {losses[1]:.4f}'
-                            )
+                        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):
+                            pbar.set_description(
+                                (
+                                    f'Epoch: [{epoch + 1} / {self.config.training.n_epochs}] '
+                                    f'iter: {self.global_step} loss-1: {losses[0]:.4f} loss-2: {losses[1]:.4f}'
+                                )
                         )
                     else:
-                        pbar.set_description(
-                            (
-                                f'Epoch: [{epoch + 1} / {self.config.training.n_epochs}] '
-                                f'iter: {self.global_step} loss: {losses[0]:.4f}'
+                        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):
+                            pbar.set_description(
+                                (
+                                    f'Epoch: [{epoch + 1} / {self.config.training.n_epochs}] '
+                                    f'iter: {self.global_step} loss: {losses[0]:.4f}'
+                                )
                             )
-                        )
 
                     with torch.no_grad():
                         if self.global_step % 50 == 0:
@@ -447,21 +472,22 @@ class BaseRunner(ABC):
                                     (self.config.training.use_DDP and self.config.training.local_rank) == 0:
                                 val_batch = next(iter(val_loader))
                                 self.sample_step(val_batch=val_batch, train_batch=train_batch)
-                                torch.cuda.empty_cache()
 
                 end_time = time.time()
                 elapsed_rounded = int(round((end_time-start_time)))
-                print("training time: " + str(datetime.timedelta(seconds=elapsed_rounded)))
+                if dist.get_rank() == 0:
+                    print("training time: " + str(datetime.timedelta(seconds=elapsed_rounded)))
+                
+                torch.cuda.empty_cache()
 
                 # validation
                 if (epoch + 1) % self.config.training.validation_interval == 0 or (
                         epoch + 1) == self.config.training.n_epochs:
                     if not self.config.training.use_DDP or \
-                            (self.config.training.use_DDP and self.config.training.local_rank) == 0:
+                            (self.config.training.use_DDP and self.config.training.local_rank == 0):
                         with torch.no_grad():
                             print("validating epoch...")
                             average_loss = self.validation_epoch(val_loader, epoch)
-                            torch.cuda.empty_cache()
                             print("validating epoch success")
 
                 # save checkpoint
@@ -469,7 +495,7 @@ class BaseRunner(ABC):
                         (epoch + 1) == self.config.training.n_epochs or \
                         self.global_step > self.config.training.n_steps:
                     if not self.config.training.use_DDP or \
-                            (self.config.training.use_DDP and self.config.training.local_rank) == 0:
+                            (self.config.training.use_DDP and self.config.training.local_rank == 0):
                         with torch.no_grad():
                             print("saving latest checkpoint...")
                             self.on_save_checkpoint(self.net, train_loader, val_loader, epoch, self.global_step)
@@ -508,7 +534,7 @@ class BaseRunner(ABC):
                                                                       'model_ckpt_name': model_ckpt_name,
                                                                       'optim_sche_ckpt_name': optim_sche_ckpt_name}
 
-                                    print(f"saving top checkpoint: average_loss={average_loss} epoch={epoch + 1}")
+                                    print(f"saving top checkpoint: val_average_loss={average_loss} epoch={epoch + 1}")
                                     torch.save(model_states,
                                                os.path.join(self.config.result.ckpt_path, model_ckpt_name))
                                     torch.save(optimizer_scheduler_states,
@@ -532,8 +558,9 @@ class BaseRunner(ABC):
                                                    os.path.join(self.config.result.ckpt_path, model_ckpt_name))
                                         torch.save(optimizer_scheduler_states,
                                                    os.path.join(self.config.result.ckpt_path, optim_sche_ckpt_name))
+            dist.destroy_process_group()
         except BaseException as e:
-            if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank) == 0:
+            if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):
                 print("exception save model start....")
                 print(self.__class__.__name__)
                 model_states, optimizer_scheduler_states = self.get_checkpoint_states(stage='exception')
@@ -541,8 +568,10 @@ class BaseRunner(ABC):
                            os.path.join(self.config.result.ckpt_path, f'last_model.pth'))
                 torch.save(optimizer_scheduler_states,
                            os.path.join(self.config.result.ckpt_path, f'last_optim_sche.pth'))
+                pbar.close()
 
                 print("exception save model success!")
+            dist.destroy_process_group()
 
             print('str(Exception):\t', str(Exception))
             print('str(e):\t\t', str(e))
@@ -558,18 +587,18 @@ class BaseRunner(ABC):
             test_dataset = val_dataset
         # test_dataset = val_dataset
         if self.config.training.use_DDP:
-            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
+            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=self.config.training.world_size, rank=self.config.training.local_rank)
             test_loader = DataLoader(test_dataset,
                                      batch_size=self.config.data.test.batch_size,
                                      shuffle=False,
-                                     num_workers=1,
+                                     num_workers=self.config.data.test.num_workers,
                                      drop_last=False,
                                      sampler=test_sampler)
         else:
             test_loader = DataLoader(test_dataset,
                                      batch_size=self.config.data.test.batch_size,
                                      shuffle=False,
-                                     num_workers=1,
+                                     num_workers=self.config.data.test.num_workers,
                                      drop_last=False)
 
         if self.use_ema:
