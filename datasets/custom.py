@@ -40,3 +40,30 @@ class Interpolation(Dataset):
 
     def __getitem__(self, i):
         return self.imgs[i]
+
+
+@Registers.datasets.register_with_name('HydraInterpolation')
+class HydraInterpolation(Dataset):
+    def __init__(self, dataset_config, stage='train'):
+        super().__init__()
+        self.image_size = (dataset_config.image_size, dataset_config.image_size)
+        self.root = dataset_config.dataset_path
+        # self.to_normal = dataset_config.to_normal in Hydra we always normal between [-1, 1]
+        if stage == 'train':
+            self.imgs = Hydra_triplet_BBDM(db_dir=self.root, train=True, crop_sz=self.image_size, aug_flip=dataset_config.aug_flip, 
+                 aug_reverse=dataset_config.aug_reverse, aug_rot=dataset_config.aug_rot, aug_blur=dataset_config.aug_blur, 
+                 samples_per_epoch=dataset_config.samples_per_epoch, test=False, val=False)
+        elif stage == 'test':
+            self.imgs = Hydra_triplet_BBDM(db_dir=self.root, train=False, crop_sz=self.image_size, aug_flip=dataset_config.aug_flip, 
+                 aug_reverse=dataset_config.aug_reverse, aug_rot=dataset_config.aug_rot, aug_blur=dataset_config.aug_blur, 
+                 samples_per_epoch=dataset_config.samples_per_epoch, test=True, val=False)
+        else:
+            self.imgs = Hydra_triplet_BBDM(db_dir=self.root, train=False, crop_sz=self.image_size, aug_flip=dataset_config.aug_flip, 
+                 aug_reverse=dataset_config.aug_reverse, aug_rot=dataset_config.aug_rot, aug_blur=dataset_config.aug_blur, 
+                 samples_per_epoch=dataset_config.samples_per_epoch, test=False, val=True)
+            
+    def __len__(self):
+        return len(self.imgs)
+
+    def __getitem__(self, i):
+        return self.imgs[i]

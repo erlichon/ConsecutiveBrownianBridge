@@ -5,8 +5,11 @@ from pathlib import Path
 import numpy as np
 import os
 import torch
-
 import torchvision.transforms.functional as TF
+import sys
+
+sys.path.insert(-1, "../LDMVFI")
+from ldm.data.bvi_vimeo import Hydra_triplet
 
 
 def rand_crop(*args, sz):
@@ -24,7 +27,15 @@ def cut(img, high,stride):
     return img
 
 
+class Hydra_triplet_BBDM(Hydra_triplet):
+    def __init__(self, db_dir, train=True, crop_sz=(256,256), aug_flip=True, 
+                 aug_reverse=True, aug_rot=True, aug_blur=True, samples_per_epoch=1000, test=False, val=False):
+        super().__init__(db_dir, train, crop_sz, aug_flip, 
+                 aug_reverse, aug_rot, aug_blur, samples_per_epoch, test, val)
 
+    def __getitem__(self, index):
+        r_val = super().__getitem__(index)
+        return [np.moveaxis(i, -1, 0) for i in r_val.values()]
 
 class Vimeo(Dataset):
     ## interpolation dataset for UCF
@@ -89,6 +100,9 @@ class Vimeo(Dataset):
             return x,y,z
         else:
             return x,z,y
+
+
+
 
 
 
