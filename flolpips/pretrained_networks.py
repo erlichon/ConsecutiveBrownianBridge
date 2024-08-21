@@ -56,7 +56,10 @@ class squeezenet(torch.nn.Module):
 class alexnet(torch.nn.Module):
     def __init__(self, requires_grad=False, pretrained=True):
         super(alexnet, self).__init__()
-        alexnet_pretrained_features = tv.alexnet(pretrained=pretrained).features
+        if pretrained:
+            alexnet_pretrained_features = tv.alexnet(weights=tv.AlexNet_Weights.IMAGENET1K_V1).features
+        else:
+            alexnet_pretrained_features = tv.alexnet().features
         self.slice1 = torch.nn.Sequential()
         self.slice2 = torch.nn.Sequential()
         self.slice3 = torch.nn.Sequential()
