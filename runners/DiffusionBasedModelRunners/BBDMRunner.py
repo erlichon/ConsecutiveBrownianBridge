@@ -55,8 +55,9 @@ class BBDMRunner(DiffusionBaseRunner):
             return total_num, trainable_num
 
         total_num, trainable_num = get_parameter_number(net)
-        print("Total Number of parameter: %.2fM" % (total_num / 1e6))
-        print("Trainable Number of parameter: %.2fM" % (trainable_num / 1e6))
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):
+            print("Total Number of parameter: %.2fM" % (total_num / 1e6))
+            print("Trainable Number of parameter: %.2fM" % (trainable_num / 1e6))
 
     def initialize_optimizer_scheduler(self, net, config):
         optimizer = get_optimizer(config.model.BB.optimizer, net.get_parameters())
@@ -133,6 +134,10 @@ class BBDMRunner(DiffusionBaseRunner):
 
         print(f"start calculating latent mean")
         batch_count = 0
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):                
+            pbar = tqdm(train_loader, total=len(train_loader), smoothing=0.01)
+        else:
+            pbar = train_loader
         for train_batch in tqdm(train_loader, total=len(train_loader), smoothing=0.01):
             # if batch_count >= max_batch_num:
             #     break
@@ -147,7 +152,7 @@ class BBDMRunner(DiffusionBaseRunner):
 
         print(f"start calculating latent std")
         batch_count = 0
-        for train_batch in tqdm(train_loader, total=len(train_loader), smoothing=0.01):
+        for train_batch in pbar:
             # if batch_count >= max_batch_num:
             #     break
             batch_count += 1
@@ -185,6 +190,8 @@ class BBDMRunner(DiffusionBaseRunner):
 
     @torch.no_grad()
     def sample(self, net, batch, sample_path, stage='train'):
+        if not (not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0)):
+            return
         sample_path = make_dir(os.path.join(sample_path, f'{stage}_sample'))
         reverse_sample_path = make_dir(os.path.join(sample_path, 'reverse_sample'))
         reverse_one_step_path = make_dir(os.path.join(sample_path, 'reverse_one_step_samples'))
@@ -250,8 +257,10 @@ class BBDMRunner(DiffusionBaseRunner):
 
     @torch.no_grad()
     def sample_to_eval(self, net, test_loader, sample_path):
-
-        pbar = tqdm(test_loader, total=len(test_loader), smoothing=0.01)
+        if not self.config.training.use_DDP or (self.config.training.use_DDP and self.config.training.local_rank == 0):                
+            pbar = tqdm(test_loader, total=len(test_loader), smoothing=0.01)
+        else:
+            pbar = test_loader
         
         to_normal = self.config.data.dataset_config.to_normal
         sample_num = self.config.testing.sample_num
