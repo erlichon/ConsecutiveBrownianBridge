@@ -61,7 +61,8 @@ def set_random_seed(SEED=1234):
     torch.cuda.manual_seed(SEED)
     torch.cuda.manual_seed_all(SEED)
     torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = True
 
 
@@ -77,6 +78,7 @@ def DDP_run_fn(rank, world_size, config):
     config.training.device = [torch.device("cuda:%d" % local_rank)]
     print('using device:', config.training.device)
     config.training.local_rank = local_rank
+    config.training.world_size = world_size
     runner = get_runner(config.runner, config)
     if config.args.train:
         runner.train()
@@ -128,3 +130,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
